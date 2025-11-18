@@ -3,7 +3,7 @@ import json
 import subprocess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QTextBrowser, QTextEdit,
-    QLabel, QProgressBar, QMessageBox, QComboBox, QSizePolicy
+    QLabel, QProgressBar, QMessageBox, QComboBox, QCheckBox, QLineEdit, QSizePolicy, QGroupBox
 )
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtCore import Qt, QUrl, QSize, pyqtSignal
@@ -41,7 +41,7 @@ class TimestampTextBrowser(QTextBrowser):
 class WhisperApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("WhisperX Meeting Transcriber")
+        self.setWindowTitle("Audio to Text Transcriber")
         self.setGeometry(300, 300, 800, 600)
         self.selected_file = ""
         self.transcribed_file = ""
@@ -52,45 +52,54 @@ class WhisperApp(QWidget):
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
 
-        # Top controls section (Language Selection & File Buttons)
-        top_controls = QHBoxLayout()
+        # ─────────────────────────────────────────────
+        # CREATE ALL WIDGETS 
+        # ─────────────────────────────────────────────
 
-        # Language selection
-        language_layout = QVBoxLayout()
+        # Language
         language_label = QLabel("Language:")
-        language_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
 
         self.language_combo = QComboBox()
         self.language_combo.addItems(["English", "Spanish", "French", "German", "Hebrew", "Chinese", "Arabic"])
+        self.language_combo.setCurrentText("Hebrew")
         self.language_combo.setMaximumWidth(150)
         self.language_map = {
-            "English": "en",
-            "Spanish": "es",
-            "French": "fr",
-            "German": "de",
-            "Hebrew": "he",
-            "Chinese": "zh",
-            "Arabic": "ar"
+            "English": "en", "Spanish": "es", "French": "fr", "German": "de",
+            "Hebrew": "he", "Chinese": "zh", "Arabic": "ar"
         }
 
-        language_layout.addWidget(language_label)
-        language_layout.addWidget(self.language_combo)
+        # Quality
+        quality_label = QLabel("Quality:")
+
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["Fast", "Medium", "Accurate"])
+        self.quality_combo.setCurrentText("Medium")
+        self.quality_combo.setMaximumWidth(150)
+
+        # Speakers
+        self.speaker1_input = QLineEdit("Me")
+        self.speaker2_input = QLineEdit("Client")
+        self.speaker_checkbox = QCheckBox("Detect speakers")
+        self.speaker_checkbox.setChecked(False)
+
+        # Timestamp checkbox
+        self.timestamps_checkbox = QCheckBox("Include timestamps")
+        self.timestamps_checkbox.setChecked(False)
 
         # File buttons
-        file_buttons_layout = QHBoxLayout()
-        file_buttons_layout.setSpacing(10)
-
         self.select_button = QPushButton("Select Recording")
-        self.select_button.setIcon(QIcon.fromTheme("document-open"))
         self.select_button.setMinimumSize(QSize(150, 50))
         self.select_button.clicked.connect(self.select_file)
 
         self.load_transcription_button = QPushButton("Load Existing")
-        self.load_transcription_button.setIcon(QIcon.fromTheme("document-open-recent"))
         self.load_transcription_button.setMinimumSize(QSize(150, 50))
         self.load_transcription_button.clicked.connect(self.load_transcription)
 
         self.transcribe_button = QPushButton("Start Transcription")
+        self.transcribe_button.setMinimumSize(QSize(150, 50))
+        self.transcribe_button.setEnabled(False)
+        self.transcribe_button.clicked.connect(self.start_transcription)
+
         self.transcribe_button.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -113,17 +122,63 @@ class WhisperApp(QWidget):
                 color: #888888;
             }
         """)
-        self.transcribe_button.setMinimumSize(QSize(150, 50))
-        self.transcribe_button.setEnabled(False)
-        self.transcribe_button.clicked.connect(self.start_transcription)
 
+        # ─────────────────────────────────────────────
+        # TOP AREA LAYOUT WITH FRAMES
+        # ─────────────────────────────────────────────
+
+        top_layout = QVBoxLayout()
+        top_layout.setSpacing(12)
+
+        # FRAME 1: LANGUAGE + QUALITY
+        setup_frame = QGroupBox()
+        setup_layout = QVBoxLayout()
+        # setup_layout.setSpacing(20)
+
+        lang_block = QVBoxLayout()
+        lang_block.addWidget(language_label)
+        lang_block.addWidget(self.language_combo)
+
+        qual_block = QVBoxLayout()
+        qual_block.addWidget(quality_label)
+        qual_block.addWidget(self.quality_combo)
+
+        setup_layout.addLayout(lang_block)
+        setup_layout.addLayout(qual_block)
+        setup_layout.addStretch()
+        setup_frame.setLayout(setup_layout)
+
+        # FRAME 2: SPEAKERS
+        speaker_frame = QGroupBox()
+        speaker_layout = QVBoxLayout()
+        speaker_layout.addWidget(QLabel("Speaker 1:"))
+        speaker_layout.addWidget(self.speaker1_input)
+        speaker_layout.addWidget(QLabel("Speaker 2:"))
+        speaker_layout.addWidget(self.speaker2_input)
+        speaker_layout.addWidget(self.speaker_checkbox)
+        speaker_frame.setLayout(speaker_layout)
+
+        # Row: Language frame + Speaker frame
+        row_frames = QHBoxLayout()
+        row_frames.addWidget(setup_frame)
+        row_frames.addWidget(speaker_frame)
+        row_frames.addStretch()
+
+        # CHECKBOX COLUMN (no frame)
+        checkbox_layout = QVBoxLayout()
+        checkbox_layout.addWidget(self.timestamps_checkbox)
+        checkbox_layout.addStretch()
+
+        # FILE BUTTON ROW
+        file_buttons_layout = QHBoxLayout()
         file_buttons_layout.addWidget(self.select_button)
         file_buttons_layout.addWidget(self.load_transcription_button)
         file_buttons_layout.addWidget(self.transcribe_button)
 
-        top_controls.addLayout(language_layout)
-        top_controls.addStretch()
-        top_controls.addLayout(file_buttons_layout)
+        # Add UI blocks to top layout
+        top_layout.addLayout(row_frames)
+        top_layout.addLayout(checkbox_layout)
+        top_layout.addLayout(file_buttons_layout)
 
         # Progress section
         progress_layout = QVBoxLayout()
@@ -218,6 +273,7 @@ class WhisperApp(QWidget):
         self.transcript_text = TimestampTextBrowser()
         self.transcript_text.setHtml("<p>Transcript will appear here after processing...</p>")
         self.transcript_text.setFont(QFont("Arial", 11))
+        self.transcript_text.setMinimumHeight(350)
         self.transcript_text.timestamp_clicked.connect(self.jump_to_timestamp)
 
         # Log section
@@ -235,11 +291,11 @@ class WhisperApp(QWidget):
         bottom_controls.addWidget(self.open_button)
 
         # Add all sections to the layout
-        main_layout.addLayout(top_controls)
+        main_layout.addLayout(top_layout)
         main_layout.addLayout(progress_layout)
         main_layout.addLayout(player_controls)
         main_layout.addWidget(QLabel("Transcript:"))
-        main_layout.addWidget(self.transcript_text, 1)
+        main_layout.addWidget(self.transcript_text, 3)
         main_layout.addWidget(QLabel("Log:"))
         main_layout.addWidget(self.log_text)
         main_layout.addLayout(bottom_controls)
@@ -287,6 +343,30 @@ class WhisperApp(QWidget):
         # Also print to console for debugging
         print(formatted_message)
 
+    def get_quality_preset(self, quality):
+        presets = {
+            "Fast": {
+                "model_size": "small",
+                "beam_size": 1,
+                "temperature": [0.0],
+                "use_vad": False
+            },
+            "Medium": {
+                "model_size": "medium",
+                "beam_size": 3,
+                "temperature": [0.0, 0.2],
+                "use_vad": False
+            },
+            "Accurate": {
+                "model_size": "large-v2",
+                "beam_size": 5,
+                "temperature": [0.0, 0.2, 0.4],
+                "use_vad": False
+            }
+        }
+
+        # fallback just in case
+        return presets.get(quality, presets["Medium"])
                           
     def start_transcription(self):
         if not self.selected_file:
@@ -295,14 +375,30 @@ class WhisperApp(QWidget):
 
         selected_language = self.language_combo.currentText()
         language_code = self.language_map[selected_language]
-
+        quality = self.quality_combo.currentText()
+        preset = self.get_quality_preset(quality)
+        include_timestamps = self.timestamps_checkbox.isChecked()
+        enable_diarization = self.speaker_checkbox.isChecked()
+        speaker1_name = self.speaker1_input.text()
+        speaker2_name = self.speaker2_input.text()
+        
         self.transcribe_button.setEnabled(False)
         self.progress_bar.setValue(0)
         self.step_label.setText("Preparing...")
         self.status_label.setText("Starting transcription...")
         self.log_text.append(f"Starting transcription in {selected_language}...")
-
-        self.worker = WhisperWorker(self.selected_file, language_code)
+        self.worker = WhisperWorker(
+            self.selected_file,
+            language_code,
+            model_size = preset["model_size"],
+            beam_size = preset["beam_size"],
+            temperature = preset["temperature"],
+            use_vad = preset["use_vad"],
+            include_timestamps = include_timestamps,
+            enable_diarization=enable_diarization,
+            speaker1=speaker1_name,
+            speaker2=speaker2_name
+        )
         self.worker.progress.connect(self.update_progress)
         self.worker.step_update.connect(self.update_step)
         self.worker.status_update.connect(self.update_status)

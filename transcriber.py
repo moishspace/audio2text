@@ -5,9 +5,11 @@ import torch
 import subprocess
 import tempfile
 import threading
+import whisperx
 from PyQt6.QtCore import QThread, pyqtSignal
 from audio_utils import convert_m4a_to_wav
 from faster_whisper import WhisperModel
+from whisperx import load_align_model, DiarizationPipeline
 
 class WhisperWorker(QThread):
     progress = pyqtSignal(int)  # Overall progress percentage (0-100)
@@ -18,10 +20,14 @@ class WhisperWorker(QThread):
     error = pyqtSignal(str)
     transcript_ready = pyqtSignal(list)
 
-    def __init__(self, file_path, language):
+    def __init__(self, file_path, language, model_size, beam_size, temperature, use_vad, include_timestamps, enable_diarization, speaker1, speaker2):
         super().__init__()
         self.file_path = file_path
         self.language = language
+        self.include_timestamps = include_timestamps
+        self.enable_diarization = enable_diarization
+        self.speaker1 = speaker1
+        self.speaker2 = speaker2
         
         # Check if CUDA is available (for NVIDIA GPUs)
         self.has_cuda = torch.cuda.is_available()
@@ -61,10 +67,10 @@ class WhisperWorker(QThread):
         self.estimated_transcription_time = 0
         self.transcription_start_time = 0
         
-        # Optimized settings for faster performance
-        self.model_size = "small"  # Use smaller model for faster processing
-        self.beam_size = 1  # Smallest beam size for maximum speed
-        self.use_vad = True  # Voice activity detection helps with transcription quality
+        self.model_size = model_size
+        self.beam_size = beam_size
+        self.temperature = temperature
+        self.use_vad = use_vad
         
         # For longer recordings, enable chunking
         self.chunk_size = 30  # Process in 30-second chunks for better memory efficiency
@@ -246,8 +252,10 @@ class WhisperWorker(QThread):
                                 result, info = model.transcribe(
                                     chunk_file,
                                     language=language_code,
+                                    task="transcribe",
                                     beam_size=self.beam_size,
                                     vad_filter=self.use_vad,
+                                    temperature=self.temperature,
                                     word_timestamps=False
                                 )
                                 
@@ -275,8 +283,10 @@ class WhisperWorker(QThread):
                     segments, info = model.transcribe(
                         self.file_path,
                         language=language_code,
+                        task="transcribe",
                         beam_size=self.beam_size,
                         vad_filter=self.use_vad,
+                        temperature=self.temperature,
                         word_timestamps=False
                     )
                     
@@ -306,6 +316,17 @@ class WhisperWorker(QThread):
             # STEP 5: Process transcript
             self.update_step(4)
             self.log_message.emit("Processing transcript results...")
+            # SAFE DIARIZATION CHECK
+            if self.enable_diarization:
+                if self.device != "cuda":
+                    self.log_message.emit("⚠️ Speaker diarization is not supported on macOS / CPU. Skipping.")
+                else:
+                    self.log_message.emit("Running speaker diarization...")
+                    try:
+                        segments_list = self.apply_diarization(segments_list)
+                        self.log_message.emit("Diarization complete.")
+                    except Exception as e:
+                        self.log_message.emit(f"⚠️ Diarization failed: {str(e)} — continuing without speaker labels.")
             structured_transcript = self.process_transcription(segments_list)
             self.log_message.emit(f"Processed {len(structured_transcript)} transcript segments")
             
@@ -401,7 +422,15 @@ class WhisperWorker(QThread):
 
         self.log_message.emit(f"Saving txt transcript to: {os.path.basename(txt_file)}")
         with open(txt_file, "w", encoding="utf-8") as f:
-            f.write("\n".join([seg["timestamp_str"] + " " + seg["text"] for seg in structured_transcript]))
+            lines = []
+            for seg in structured_transcript:
+                if self.include_timestamps:
+                    line = f"{seg['timestamp_str']} {seg['text']}"
+                else:
+                    line = seg['text']
+                lines.append(line)
+
+            f.write("\n".join(lines))
 
         self.log_message.emit(f"Saving json transcript to: {os.path.basename(json_file)}")
         with open(json_file, "w", encoding="utf-8") as f:
@@ -442,3 +471,32 @@ class WhisperWorker(QThread):
             hours, remainder = divmod(int(seconds), 3600)
             minutes, seconds = divmod(remainder, 60)
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+    def apply_diarization(self, segments):
+
+        audio = whisperx.load_audio(self.file_path)
+        
+        diar_model = whisperx.DiarizationPipeline(device=self.device)
+        diarization = diar_model(audio)
+
+        # diarization returns speaker segments like:
+        # [{'start': x, 'end': y, 'speaker': 'SPEAKER_00'}, ...]
+
+        # Now map transcript segments to speaker blocks
+        for seg in segments:
+            seg['speaker'] = self.find_speaker_for_time(seg['start'], diarization)
+
+        # Replace names
+        for seg in segments:
+            if seg['speaker'] == "SPEAKER_00":
+                seg['speaker'] = self.speaker1
+            else:
+                seg['speaker'] = self.speaker2
+
+        return segments
+    
+    def find_speaker_for_time(self, time, diarization_segments):
+        for d in diarization_segments:
+            if d['start'] <= time <= d['end']:
+                return d['speaker']
+        return "Unknown"

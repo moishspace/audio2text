@@ -406,6 +406,9 @@ class WhisperApp(QWidget):
         self.worker.finished.connect(self.transcription_done)
         self.worker.error.connect(self.handle_error)
         self.worker.transcript_ready.connect(self.display_transcript)
+        self.worker.chunk_text_ready.connect(self.display_chunk_text)
+        # Clear transcript for fresh start
+        self.transcript_text.setHtml("<p><i>Transcribing... chunks will appear here as they complete.</i></p>")
         self.worker.start()
 
     def update_progress(self, value):
@@ -417,6 +420,33 @@ class WhisperApp(QWidget):
     def update_status(self, status_text):
         self.status_label.setText(status_text)
 
+    def display_chunk_text(self, text, start_time, end_time):
+        """Display chunk text in real-time as transcription progresses"""
+        # Format timestamp
+        start_min = int(start_time // 60)
+        start_sec = int(start_time % 60)
+        timestamp_str = f"({start_min:02d}:{start_sec:02d})"
+
+        # Get current HTML and append new chunk
+        current_html = self.transcript_text.toHtml()
+
+        # If this is the first chunk, replace the placeholder
+        if "chunks will appear here" in current_html:
+            new_html = f"""
+            <style>
+                .chunk {{ margin: 8px 0; padding: 8px; background-color: #f8f9fa; border-left: 3px solid #007bff; }}
+                .timestamp {{ color: #007bff; font-weight: bold; }}
+            </style>
+            <div class="chunk"><span class="timestamp">{timestamp_str}</span> {text}</div>
+            """
+            self.transcript_text.setHtml(new_html)
+        else:
+            # Append to existing content
+            self.transcript_text.append(f'<div class="chunk"><span class="timestamp">{timestamp_str}</span> {text}</div>')
+
+        # Scroll to bottom to show latest chunk
+        scrollbar = self.transcript_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def transcription_done(self, output_data):
         txt_file, json_file, _ = output_data.split("|")

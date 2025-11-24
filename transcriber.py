@@ -9,7 +9,7 @@ import whisperx
 from PyQt6.QtCore import QThread, pyqtSignal
 from audio_utils import convert_m4a_to_wav
 from faster_whisper import WhisperModel
-from whisperx import load_align_model, DiarizationPipeline
+from whisperx import DiarizationPipeline
 
 class WhisperWorker(QThread):
     progress = pyqtSignal(int)  # Overall progress percentage (0-100)
@@ -19,6 +19,7 @@ class WhisperWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
     transcript_ready = pyqtSignal(list)
+    chunk_text_ready = pyqtSignal(str, float, float)  # text, start_time, end_time
 
     def __init__(self, file_path, language, model_size, beam_size, temperature, use_vad, include_timestamps, enable_diarization, speaker1, speaker2):
         super().__init__()
@@ -46,10 +47,10 @@ class WhisperWorker(QThread):
             import platform
             if platform.processor() == 'arm':
                 self.device_info = "Apple Silicon CPU (M1/M2 optimized)"
-                self.speed_multiplier = 0.9  # Updated based on actual performance
+                self.speed_multiplier = 0.5  # Faster with int8 quantization
             else:
                 self.device_info = "CPU"
-                self.speed_multiplier = 0.9  # Standard CPU
+                self.speed_multiplier = 0.7  # Standard CPU with int8
         
         # Define the main processing steps
         self.steps = [
@@ -71,9 +72,6 @@ class WhisperWorker(QThread):
         self.beam_size = beam_size
         self.temperature = temperature
         self.use_vad = use_vad
-        
-        # For longer recordings, enable chunking
-        self.chunk_size = 30  # Process in 30-second chunks for better memory efficiency
     
     def update_step(self, step_index, status_text=None):
         """Update current processing step"""
@@ -133,19 +131,21 @@ class WhisperWorker(QThread):
             self.update_step(1)
             self.log_message.emit("Loading faster-whisper model...")
             
-            # Always use float32 on M1 Mac to avoid the "float16 not supported" error
-            compute_type = "float32"
-            self.log_message.emit(f"Loading faster-whisper model with compute type: {compute_type}")
-            
-            # Use appropriate device settings for faster-whisper
+            # Select optimal compute type based on device
             if self.device == "cuda":
-                self.log_message.emit("Initializing model on CUDA GPU...")
-                model = WhisperModel("medium", device="cuda", compute_type=compute_type)
+                compute_type = "float16"  # Faster on NVIDIA GPUs
             else:
-                # For both MPS and CPU, use CPU with optimizations
-                self.log_message.emit("Initializing model on CPU with optimizations...")
-                model = WhisperModel("medium", device="cpu", compute_type=compute_type)
-                
+                compute_type = "int8"  # Much faster on CPU/Apple Silicon
+
+            self.log_message.emit(f"Loading faster-whisper model ({self.model_size}) with compute type: {compute_type}")
+
+            # Load model ONCE with user-selected size
+            model = WhisperModel(
+                self.model_size,
+                device=self.device,
+                compute_type=compute_type
+            )
+
             self.log_message.emit("Model successfully loaded")
                 
             # STEP 3: Prepare for transcription
@@ -189,33 +189,22 @@ class WhisperWorker(QThread):
                 language_code = self.language if self.language else "en"
                 
                 # Log optimized settings being used
-                self.log_message.emit(f"Using optimized settings for long recordings: model={self.model_size}, beam_size={self.beam_size}")
-                
-                # Create new model with smaller size for faster processing
-                model = WhisperModel(
-                    self.model_size,  # Use small model for faster processing
-                    device=self.device,
-                    compute_type="float32"
-                )
-                
-                self.log_message.emit(f"Starting transcription with optimized settings...")
-                
+                self.log_message.emit(f"Using optimized settings: model={self.model_size}, beam_size={self.beam_size}, compute={compute_type}")
+
                 # For long recordings, use chunking to avoid memory issues and provide better progress updates
-                duration = self.get_audio_duration(self.file_path)
-                
-                if duration > 60:  # If recording is longer than 5 minutes
+                if duration > 300:  # If recording is longer than 5 minutes
                     self.log_message.emit(f"Long recording detected ({self.format_time(duration)}). Using chunked processing...")
-                    
-                    # Process in smaller chunks for better memory efficiency and faster results
+
+                    # Process in larger chunks to reduce ffmpeg overhead
                     segments_list = []
-                    
+
                     # Create a temporary directory for audio chunks
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        # Calculate number of chunks
-                        chunk_duration = 60  # 60 second chunks
+                        # Calculate number of chunks - use 5 minute chunks to reduce overhead
+                        chunk_duration = 300  # 5 minute chunks (was 60s - reduces ffmpeg calls by 5x)
                         num_chunks = int(duration / chunk_duration) + 1
-                        
-                        self.log_message.emit(f"Processing {num_chunks} chunks of {chunk_duration} seconds each")
+
+                        self.log_message.emit(f"Processing {num_chunks} chunks of {chunk_duration//60} minutes each")
                         
                         for i in range(num_chunks):
                             start_chunk_time = i * chunk_duration
@@ -223,12 +212,7 @@ class WhisperWorker(QThread):
                             # Skip processing if we're beyond the audio duration
                             if start_chunk_time >= duration:
                                 break
-                            
-                            # Update progress based on chunks processed
-                            chunk_progress = int((i / num_chunks) * 100)
-                            chunk_progress = int(((i+1) / num_chunks) * 100)
-                            self.update_transcription_progress(chunk_progress)
-                            
+
                             # Extract a chunk of audio
                             chunk_file = os.path.join(temp_dir, f"chunk_{i}.wav")
                             
@@ -256,7 +240,8 @@ class WhisperWorker(QThread):
                                     beam_size=self.beam_size,
                                     vad_filter=self.use_vad,
                                     temperature=self.temperature,
-                                    word_timestamps=False
+                                    word_timestamps=False,
+                                    condition_on_previous_text=False  # Faster, prevents hallucination loops
                                 )
                                 
                                 # Process the segments from this chunk
@@ -269,8 +254,18 @@ class WhisperWorker(QThread):
                                     segment.end += start_chunk_time
                                     segments_list.append(segment)
                                 
-                                # self.log_message.emit(f"Chunk {i+1}/{num_chunks} completed with {len(chunk_segments)} segments")
+                                # Update progress AFTER chunk completes
+                                chunk_progress = int(((i+1) / num_chunks) * 100)
+                                self.update_transcription_progress(chunk_progress)
                                 self.log_message.emit(f"Chunk {i+1}/{num_chunks} completed with {len(chunk_segments)} segments ({chunk_progress}% complete)")
+
+                                # Emit chunk text for real-time display
+                                if chunk_segments:
+                                    chunk_text = " ".join([seg.text.strip() for seg in chunk_segments])
+                                    # Timestamps already adjusted above
+                                    chunk_start = chunk_segments[0].start
+                                    chunk_end = chunk_segments[-1].end
+                                    self.chunk_text_ready.emit(chunk_text, chunk_start, chunk_end)
 
                                 
                             except Exception as e:
@@ -287,7 +282,8 @@ class WhisperWorker(QThread):
                         beam_size=self.beam_size,
                         vad_filter=self.use_vad,
                         temperature=self.temperature,
-                        word_timestamps=False
+                        word_timestamps=False,
+                        condition_on_previous_text=False  # Faster, prevents hallucination loops
                     )
                     
                     # Convert generator to list IMMEDIATELY
@@ -476,7 +472,7 @@ class WhisperWorker(QThread):
 
         audio = whisperx.load_audio(self.file_path)
         
-        diar_model = whisperx.DiarizationPipeline(device=self.device)
+        diar_model = DiarizationPipeline(device=self.device)
         diarization = diar_model(audio)
 
         # diarization returns speaker segments like:
